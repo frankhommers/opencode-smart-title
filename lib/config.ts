@@ -9,7 +9,9 @@ export interface PluginConfig {
     enabled: boolean
     debug: boolean
     model?: string
+    prompt?: string
     updateThreshold: number
+    excludeDirectories?: string[]
     /**
      * Title format with placeholders:
      * - {title} - AI-generated title
@@ -17,6 +19,8 @@ export interface PluginConfig {
      * - {cwdTip} - Last folder name of cwd (e.g., "my-project")
      * - {cwdTip:N} - Last N folder segments (e.g., {cwdTip:2} -> "github/my-project")
      * - {cwdTip:N:sep} - Last N segments with custom separator (e.g., {cwdTip:2: - } -> "github - my-project")
+     * - {cwdTip:git} - Segments from git root to cwd (falls back to 1 if no .git found)
+     * - {cwdTip:git:sep} - Same with custom separator
      */
     titleFormat: string
 }
@@ -103,8 +107,17 @@ function createDefaultConfig(): void {
   // Examples: "anthropic/claude-haiku-4-5", "openai/gpt-5-mini"
   // "model": "anthropic/claude-haiku-4-5",
 
+  // Optional: Custom prompt for title generation
+  // If not specified, uses the built-in English prompt
+  // "prompt": "Generate a short descriptive title for this conversation.",
+
   // Update title every N idle events (default: 1)
   "updateThreshold": 1,
+
+  // Optional: Directories to exclude from title generation
+  // Sessions in these directories will not get automatic titles
+  // Uses prefix matching (e.g. "/home/user/.heartbeat" matches any subdirectory)
+  // "excludeDirectories": ["/home/user/.heartbeat"],
 
   // Title format with placeholders:
   // - {title} - AI-generated title based on conversation
@@ -112,6 +125,8 @@ function createDefaultConfig(): void {
   // - {cwdTip} - Last folder name of cwd (e.g., "my-project")
   // - {cwdTip:N} - Last N folder segments (e.g., {cwdTip:2} -> "github/my-project")
   // - {cwdTip:N:sep} - Last N segments with custom separator (e.g., {cwdTip:2: - } -> "github - my-project")
+  // - {cwdTip:git} - Segments from git root to cwd (falls back to tip if no .git found)
+  // - {cwdTip:git:sep} - Same with custom separator
   // Example: "[{cwdTip}] {title}" produces "[my-project] Debugging API errors"
   "titleFormat": "{title}"
 }
@@ -129,6 +144,63 @@ function loadConfigFile(configPath: string): Partial<PluginConfig> | null {
         return parse(fileContent) as Partial<PluginConfig>
     } catch {
         return null
+    }
+}
+
+function normalizeBoolean(value: unknown, fallback: boolean): boolean {
+    return typeof value === 'boolean' ? value : fallback
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+    if (typeof value !== 'string') {
+        return undefined
+    }
+
+    const normalized = value.trim()
+    return normalized.length > 0 ? normalized : undefined
+}
+
+function normalizePositiveInt(value: unknown, fallback: number): number {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return fallback
+    }
+
+    const normalized = Math.floor(value)
+    return normalized > 0 ? normalized : fallback
+}
+
+function normalizeExcludeDirectories(value: unknown): string[] | undefined {
+    if (!Array.isArray(value)) {
+        return undefined
+    }
+
+    return value
+        .filter((entry): entry is string => typeof entry === 'string')
+        .map(entry => {
+            const trimmed = entry.trim()
+            if (trimmed === '/') {
+                return '/'
+            }
+            return trimmed.replace(/\/+$/, '')
+        })
+        .filter(entry => entry.length > 0)
+}
+
+function mergeConfig(base: PluginConfig, overlay: Partial<PluginConfig>): PluginConfig {
+    const model = normalizeOptionalString(overlay.model)
+    const prompt = normalizeOptionalString(overlay.prompt)
+    const excludeDirectories = normalizeExcludeDirectories(overlay.excludeDirectories)
+
+    return {
+        enabled: normalizeBoolean(overlay.enabled, base.enabled),
+        debug: normalizeBoolean(overlay.debug, base.debug),
+        model: model ?? base.model,
+        prompt: prompt ?? base.prompt,
+        updateThreshold: normalizePositiveInt(overlay.updateThreshold, base.updateThreshold),
+        excludeDirectories: excludeDirectories ?? base.excludeDirectories,
+        titleFormat: (typeof overlay.titleFormat === 'string' && overlay.titleFormat.trim().length > 0)
+            ? overlay.titleFormat.trim()
+            : base.titleFormat
     }
 }
 
@@ -152,13 +224,7 @@ export function getConfig(ctx?: PluginInput): PluginConfig {
     if (configPaths.global) {
         const globalConfig = loadConfigFile(configPaths.global)
         if (globalConfig) {
-            config = {
-                enabled: globalConfig.enabled ?? config.enabled,
-                debug: globalConfig.debug ?? config.debug,
-                model: globalConfig.model ?? config.model,
-                updateThreshold: globalConfig.updateThreshold ?? config.updateThreshold,
-                titleFormat: globalConfig.titleFormat ?? config.titleFormat
-            }
+            config = mergeConfig(config, globalConfig)
         }
     } else {
         createDefaultConfig()
@@ -167,13 +233,7 @@ export function getConfig(ctx?: PluginInput): PluginConfig {
     if (configPaths.project) {
         const projectConfig = loadConfigFile(configPaths.project)
         if (projectConfig) {
-            config = {
-                enabled: projectConfig.enabled ?? config.enabled,
-                debug: projectConfig.debug ?? config.debug,
-                model: projectConfig.model ?? config.model,
-                updateThreshold: projectConfig.updateThreshold ?? config.updateThreshold,
-                titleFormat: projectConfig.titleFormat ?? config.titleFormat
-            }
+            config = mergeConfig(config, projectConfig)
         }
     }
 
