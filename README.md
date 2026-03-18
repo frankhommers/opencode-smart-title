@@ -1,10 +1,8 @@
 # Smart Title Plugin
 
-Auto-generates meaningful session titles for your OpenCode conversations using AI.
+Auto-generates meaningful session titles for your OpenCode conversations using AI. Published as `@frankhommers/opencode-smart-title`.
 
-This fork is maintained at `frankhommers/opencode-smart-title` and published as `@frankhommers/opencode-smart-title`.
-
-## Why This Fork
+## Highlights
 
 - Custom title formatting with placeholders like `{cwdTip}` and `{cwdTip:git}`
 - Custom prompt support for title style or language
@@ -160,6 +158,16 @@ npm publish --access public
 ```
 
 You can also bump versions manually in `package.json` if you prefer.
+
+## Origins and Acknowledgements
+
+This project is based on [`Tarquinen/opencode-smart-title`](https://github.com/Tarquinen/opencode-smart-title) by Dan Mindru.
+
+It incorporates ideas and code from the following upstream contributions:
+
+- [PR #5](https://github.com/Tarquinen/opencode-smart-title/pull/5) - `titleFormat` config with placeholder support (`{title}`, `{cwd}`, `{cwdTip}`, `{cwdTip:N}`, `{cwdTip:git}`)
+- [PR #8](https://github.com/Tarquinen/opencode-smart-title/pull/8) - Custom `prompt`, `excludeDirectories`, and robust config parsing (by [@the3asic](https://github.com/the3asic))
+- [PR #9](https://github.com/Tarquinen/opencode-smart-title/pull/9) - Enhanced model-selection error logging and timing diagnostics (by [@the3asic](https://github.com/the3asic))
 
 ## License
 
