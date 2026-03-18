@@ -10,21 +10,19 @@ Auto-generates meaningful session titles for your OpenCode conversations using A
 - Safer config parsing and merging
 - Better model-selection diagnostics when generation fails or slows down
 
-## Quick Install
+## Install
 
-Install the package:
-
-```bash
-npm install @frankhommers/opencode-smart-title
-```
-
-Enable it in `~/.config/opencode/opencode.json`:
+Add to your OpenCode config (`~/.config/opencode/opencode.json` for global, or `.opencode/opencode.json` for per-project):
 
 ```json
 {
   "plugin": ["@frankhommers/opencode-smart-title"]
 }
 ```
+
+OpenCode installs the plugin automatically on next startup. Updates are picked up automatically too.
+
+To pin a specific version: `"@frankhommers/opencode-smart-title@0.3.0"`
 
 ## Quick Start
 
