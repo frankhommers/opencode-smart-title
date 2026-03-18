@@ -18,6 +18,7 @@ import { selectModel } from "./lib/model-selector.js"
 import { TITLE_PROMPT } from "./prompt.js"
 import { join } from "path"
 import { homedir } from "os"
+import { existsSync } from "fs"
 
 // Type for OpenCode client object
 interface OpenCodeClient {
@@ -72,7 +73,7 @@ async function isSubagentSession(
     client: OpenCodeClient,
     sessionID: string,
     logger: Logger
-): Promise<boolean> {
+): Promise<{ isSubagent: boolean; directory?: string }> {
     try {
         const result = await client.session.get({ path: { id: sessionID } })
 
@@ -81,16 +82,16 @@ async function isSubagentSession(
                 sessionID,
                 parentID: result.data.parentID
             })
-            return true
+            return { isSubagent: true }
         }
 
-        return false
+        return { isSubagent: false, directory: result.data?.directory }
     } catch (error: any) {
         logger.error("subagent-check", "Failed to check if session is subagent", {
             sessionID,
             error: error.message
         })
-        return false
+        return { isSubagent: false }
     }
 }
 
@@ -262,13 +263,83 @@ function cleanTitle(raw: string): string {
 }
 
 /**
+ * Placeholder values available for title formatting
+ */
+interface PlaceholderValues {
+    title: string
+    cwd: string
+}
+
+/**
+ * Find the git root depth relative to cwd
+ * Walks up from cwd looking for .git directory
+ * Returns the number of segments from git root to cwd, or 1 if no .git found
+ */
+function findGitDepth(cwd: string): number {
+    const segments = cwd.split('/').filter(s => s.length > 0)
+    for (let i = segments.length; i >= 1; i--) {
+        const candidate = '/' + segments.slice(0, i).join('/')
+        if (existsSync(join(candidate, '.git'))) {
+            return segments.length - i + 1
+        }
+    }
+    return 1
+}
+
+/**
+ * Resolve a cwdTip placeholder with optional parameters
+ * Formats:
+ *   {cwdTip}          - last folder name (default)
+ *   {cwdTip:N}        - last N folder segments, joined by "/"
+ *   {cwdTip:N:sep}    - last N folder segments, joined by custom separator
+ *   {cwdTip:git}      - segments from git root to cwd, joined by "/"
+ *   {cwdTip:git:sep}  - segments from git root to cwd, joined by custom separator
+ */
+function resolveCwdTip(cwd: string, depth: number, separator: string): string {
+    const segments = cwd.split('/').filter(s => s.length > 0)
+    const selected = segments.slice(-depth)
+    return selected.join(separator)
+}
+
+/**
+ * Apply placeholder replacements to title format
+ * Supports: {title}, {cwd}, {cwdTip}, {cwdTip:N}, {cwdTip:N:separator}, {cwdTip:git}, {cwdTip:git:separator}
+ */
+function applyTitleFormat(format: string, values: PlaceholderValues): string {
+    let result = format
+        .replace(/\{title\}/g, values.title)
+        .replace(/\{cwd\}/g, values.cwd)
+        .replace(/\{cwdTip(?::([^:}]+)(?::([^}]+))?)?\}/g, (_match, depthOrGit, separator) => {
+            let depth: number
+            if (!depthOrGit) {
+                depth = 1
+            } else if (depthOrGit === 'git') {
+                depth = findGitDepth(values.cwd)
+            } else {
+                depth = parseInt(depthOrGit, 10)
+                if (isNaN(depth)) depth = 1
+            }
+            const sep = separator ?? '/'
+            return resolveCwdTip(values.cwd, depth, sep)
+        })
+
+    // Truncate final result if too long
+    if (result.length > 100) {
+        result = result.substring(0, 97) + "..."
+    }
+
+    return result
+}
+
+/**
  * Generate title from conversation context using AI
  */
 async function generateTitleFromContext(
     context: string,
     configModel: string | undefined,
     logger: Logger,
-    client: OpenCodeClient
+    client: OpenCodeClient,
+    customPrompt?: string
 ): Promise<string | null> {
     try {
         logger.debug('title-generation', 'Selecting model', { configModel })
@@ -308,8 +379,11 @@ async function generateTitleFromContext(
             }
         }
 
+        const prompt = customPrompt || TITLE_PROMPT
+
         logger.debug('title-generation', 'Generating title', {
-            contextLength: context.length
+            contextLength: context.length,
+            promptSource: customPrompt ? 'custom' : 'built-in'
         })
 
         // Lazy import - only load the 2.8MB ai package when actually needed
@@ -320,7 +394,7 @@ async function generateTitleFromContext(
             messages: [
                 {
                     role: 'user',
-                    content: `${TITLE_PROMPT}\n\n<conversation>\n${context}\n</conversation>\n\nOutput the title now:`
+                    content: `${prompt}\n\n<conversation>\n${context}\n</conversation>\n\nOutput the title now:`
                 }
             ]
         })
@@ -351,10 +425,11 @@ async function updateSessionTitle(
     client: OpenCodeClient,
     sessionId: string,
     logger: Logger,
-    config: ReturnType<typeof getConfig>
+    config: ReturnType<typeof getConfig>,
+    cwd: string
 ): Promise<void> {
     try {
-        logger.info('update-title', 'Title update triggered', { sessionId })
+        logger.info('update-title', 'Title update triggered', { sessionId, cwd })
 
         // Extract smart context
         const turns = await extractSmartContext(client, sessionId, logger)
@@ -381,22 +456,33 @@ async function updateSessionTitle(
         // Format context
         const context = formatContextForTitle(turns)
 
-        // Generate title
-        const newTitle = await generateTitleFromContext(
+        // Generate title from AI
+        const generatedTitle = await generateTitleFromContext(
             context,
             config.model,
             logger,
-            client
+            client,
+            config.prompt
         )
 
-        if (!newTitle) {
+        if (!generatedTitle) {
             logger.warn('update-title', 'Title generation returned null', { sessionId })
             return
         }
 
+        // Apply title format with placeholders
+        const placeholderValues: PlaceholderValues = {
+            title: generatedTitle,
+            cwd: cwd
+        }
+
+        const newTitle = applyTitleFormat(config.titleFormat, placeholderValues)
+
         logger.info('update-title', 'Updating session with new title', {
             sessionId,
-            title: newTitle
+            generatedTitle,
+            titleFormat: config.titleFormat,
+            finalTitle: newTitle
         })
 
         // Update session
@@ -434,11 +520,15 @@ const SmartTitlePlugin: Plugin = async (ctx) => {
     const logger = new Logger(config.debug)
     const { client } = ctx
 
+    const cwd = ctx.directory || process.cwd()
+
     logger.info('plugin', 'Smart Title plugin initialized', {
         enabled: config.enabled,
         debug: config.debug,
         model: config.model,
         updateThreshold: config.updateThreshold,
+        titleFormat: config.titleFormat,
+        cwd,
         globalConfigFile: join(homedir(), ".config", "opencode", "smart-title.jsonc"),
         projectConfigFile: ctx.directory ? join(ctx.directory, ".opencode", "smart-title.jsonc") : "N/A",
         logDirectory: join(homedir(), ".config", "opencode", "logs", "smart-title")
@@ -453,9 +543,29 @@ const SmartTitlePlugin: Plugin = async (ctx) => {
 
                 logger.debug('event', 'Session became idle', { sessionId })
 
-                // Skip if this is a subagent session
-                if (await isSubagentSession(client, sessionId, logger)) {
+                // Skip if this is a subagent session, and get directory
+                const { isSubagent, directory } = await isSubagentSession(client, sessionId, logger)
+                if (isSubagent) {
                     return
+                }
+
+                // Check excludeDirectories
+                if (config.excludeDirectories && config.excludeDirectories.length > 0 && directory) {
+                    const normalizedDir = directory.replace(/\/+$/, '')
+                    if (!normalizedDir) {
+                        return
+                    }
+                    const excluded = config.excludeDirectories.some(excl => {
+                        return normalizedDir === excl || normalizedDir.startsWith(excl + '/')
+                    })
+                    if (excluded) {
+                        logger.debug('event', 'Session directory excluded from title generation', {
+                            sessionId,
+                            directory: normalizedDir,
+                            excludeDirectories: config.excludeDirectories
+                        })
+                        return
+                    }
                 }
 
                 // Increment idle count for this session
@@ -485,7 +595,7 @@ const SmartTitlePlugin: Plugin = async (ctx) => {
                 })
 
                 // Fire and forget - don't block the event handler
-                updateSessionTitle(client, sessionId, logger, config).catch((error) => {
+                updateSessionTitle(client, sessionId, logger, config, cwd).catch((error) => {
                     logger.error('event', 'Title update failed', {
                         sessionId,
                         error: error.message,
